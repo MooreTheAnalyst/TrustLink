@@ -129,6 +129,40 @@ impl TrustLinkContract {
         Ok(())
     }
 
+    /// Renew an existing attestation with a new expiration (issuer only)
+    pub fn renew_attestation(
+        env: Env,
+        issuer: Address,
+        attestation_id: String,
+        new_expiration: Option<u64>,
+    ) -> Result<(), Error> {
+        issuer.require_auth();
+
+        let mut attestation = Storage::get_attestation(&env, &attestation_id)?;
+
+        if attestation.issuer != issuer {
+            return Err(Error::Unauthorized);
+        }
+
+        Validation::require_issuer(&env, &issuer)?;
+
+        if attestation.revoked {
+            return Err(Error::AlreadyRevoked);
+        }
+
+        if let Some(t) = new_expiration {
+            if t <= env.ledger().timestamp() {
+                return Err(Error::InvalidExpiration);
+            }
+        }
+
+        attestation.expiration = new_expiration;
+        Storage::set_attestation(&env, &attestation);
+        Events::attestation_renewed(&env, &attestation_id, &issuer, new_expiration);
+
+        Ok(())
+    }
+
     /// Check if an address has a valid attestation of a given type
     pub fn has_valid_claim(
         env: Env,

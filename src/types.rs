@@ -10,6 +10,7 @@ pub enum Error {
     AlreadyRevoked = 5,
     DuplicateAttestation = 6,
     InvalidValidFrom = 7,
+    InvalidExpiration = 8,
 }
 
 #[contracttype]

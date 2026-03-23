@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
+use soroban_sdk::{testutils::{Address as _, Events as _, Ledger}, Address, Env, String};
 
 fn create_test_contract(env: &Env) -> (Address, TrustLinkContractClient) {
     let contract_id = env.register_contract(None, TrustLinkContract);
@@ -461,4 +461,323 @@ fn test_revoke_pending_attestation() {
     // Now the revocation takes effect: status is Revoked
     let status = client.get_attestation_status(&attestation_id);
     assert_eq!(status, types::AttestationStatus::Revoked);
+}
+
+// ── Attestation Renewal Unit Tests (Task 5.1) ─────────────────────────────────
+// Requirements: 1.2, 1.3, 2.2, 2.3, 3.1, 4.1, 4.2, 5.1, 5.3, 6.2
+
+
+#[test]
+fn test_renew_valid_attestation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let current_time: u64 = 1_000;
+    env.ledger().with_mut(|l| l.timestamp = current_time);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let initial_expiration = Some(current_time + 500);
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &initial_expiration, &None);
+
+    let new_expiration = Some(current_time + 2_000);
+    client.renew_attestation(&issuer, &attestation_id, &new_expiration);
+
+    let attestation = client.get_attestation(&attestation_id);
+    assert_eq!(attestation.expiration, new_expiration);
+
+    let status = client.get_attestation_status(&attestation_id);
+    assert_eq!(status, types::AttestationStatus::Valid);
+}
+
+#[test]
+fn test_renew_expired_attestation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let current_time: u64 = 1_000;
+    env.ledger().with_mut(|l| l.timestamp = current_time);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let near_expiration = Some(current_time + 100);
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &near_expiration, &None);
+
+    // Advance ledger past expiration
+    env.ledger().with_mut(|l| l.timestamp = current_time + 200);
+
+    // Attestation is now expired
+    assert_eq!(
+        client.get_attestation_status(&attestation_id),
+        types::AttestationStatus::Expired
+    );
+
+    // Renew with a future expiration
+    let new_expiration = Some(current_time + 5_000);
+    client.renew_attestation(&issuer, &attestation_id, &new_expiration);
+
+    let status = client.get_attestation_status(&attestation_id);
+    assert_eq!(status, types::AttestationStatus::Valid);
+
+    assert!(client.has_valid_claim(&subject, &claim_type));
+}
+
+#[test]
+fn test_renew_with_none_expiration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let current_time: u64 = 1_000;
+    env.ledger().with_mut(|l| l.timestamp = current_time);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let initial_expiration = Some(current_time + 500);
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &initial_expiration, &None);
+
+    // Renew with None → non-expiring
+    client.renew_attestation(&issuer, &attestation_id, &None);
+
+    let attestation = client.get_attestation(&attestation_id);
+    assert_eq!(attestation.expiration, None);
+
+    let status = client.get_attestation_status(&attestation_id);
+    assert_eq!(status, types::AttestationStatus::Valid);
+}
+
+#[test]
+fn test_renew_revoked_attestation_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &None, &None);
+
+    client.revoke_attestation(&issuer, &attestation_id);
+
+    let new_expiration = Some(env.ledger().timestamp() + 1_000);
+    let result = client.try_renew_attestation(&issuer, &attestation_id, &new_expiration);
+    assert_eq!(result, Err(Ok(types::Error::AlreadyRevoked)));
+}
+
+#[test]
+fn test_renew_wrong_issuer_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer_a = Address::generate(&env);
+    let issuer_b = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer_a);
+    client.register_issuer(&admin, &issuer_b);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let attestation_id =
+        client.create_attestation(&issuer_a, &subject, &claim_type, &None, &None);
+
+    let new_expiration = Some(env.ledger().timestamp() + 1_000);
+    // issuer_b tries to renew issuer_a's attestation
+    let result = client.try_renew_attestation(&issuer_b, &attestation_id, &new_expiration);
+    assert_eq!(result, Err(Ok(types::Error::Unauthorized)));
+}
+
+#[test]
+fn test_renew_unregistered_issuer_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let unregistered = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &None, &None);
+
+    let new_expiration = Some(env.ledger().timestamp() + 1_000);
+    // unregistered address attempts renewal
+    let result = client.try_renew_attestation(&unregistered, &attestation_id, &new_expiration);
+    assert_eq!(result, Err(Ok(types::Error::Unauthorized)));
+}
+
+#[test]
+fn test_renew_missing_attestation_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let nonexistent_id = String::from_str(&env, "does-not-exist");
+    let new_expiration = Some(env.ledger().timestamp() + 1_000);
+    let result = client.try_renew_attestation(&issuer, &nonexistent_id, &new_expiration);
+    assert_eq!(result, Err(Ok(types::Error::NotFound)));
+}
+
+#[test]
+fn test_renew_past_expiration_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let current_time: u64 = 2_000;
+    env.ledger().with_mut(|l| l.timestamp = current_time);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &None, &None);
+
+    // new_expiration is in the past
+    let past_time = current_time - 1;
+    let result = client.try_renew_attestation(&issuer, &attestation_id, &Some(past_time));
+    assert_eq!(result, Err(Ok(types::Error::InvalidExpiration)));
+}
+
+#[test]
+fn test_renew_expiration_equal_current_time_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let current_time: u64 = 2_000;
+    env.ledger().with_mut(|l| l.timestamp = current_time);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &None, &None);
+
+    // new_expiration == current_time must also be rejected
+    let result = client.try_renew_attestation(&issuer, &attestation_id, &Some(current_time));
+    assert_eq!(result, Err(Ok(types::Error::InvalidExpiration)));
+}
+
+#[test]
+fn test_renewal_preserves_original_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let current_time: u64 = 1_000;
+    env.ledger().with_mut(|l| l.timestamp = current_time);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let valid_from = Some(current_time + 1); // just above current so it's accepted
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &None, &valid_from);
+
+    let before = client.get_attestation(&attestation_id);
+
+    // Advance time past valid_from so renewal is allowed
+    env.ledger().with_mut(|l| l.timestamp = current_time + 100);
+
+    let new_expiration = Some(current_time + 5_000);
+    client.renew_attestation(&issuer, &attestation_id, &new_expiration);
+
+    let after = client.get_attestation(&attestation_id);
+
+    // Only expiration should change
+    assert_eq!(after.issuer, before.issuer);
+    assert_eq!(after.subject, before.subject);
+    assert_eq!(after.claim_type, before.claim_type);
+    assert_eq!(after.timestamp, before.timestamp);
+    assert_eq!(after.valid_from, before.valid_from);
+    // expiration is updated
+    assert_eq!(after.expiration, new_expiration);
+}
+
+#[test]
+fn test_no_event_on_renewal_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let subject = Address::generate(&env);
+    let (_, client) = create_test_contract(&env);
+
+    client.initialize(&admin);
+    client.register_issuer(&admin, &issuer);
+
+    let claim_type = String::from_str(&env, "KYC_PASSED");
+    let attestation_id =
+        client.create_attestation(&issuer, &subject, &claim_type, &None, &None);
+
+    client.revoke_attestation(&issuer, &attestation_id);
+
+    // Capture event count before the failing renewal
+    let events_before = env.events().all().len();
+
+    let new_expiration = Some(env.ledger().timestamp() + 1_000);
+    let _ = client.try_renew_attestation(&issuer, &attestation_id, &new_expiration);
+
+    // No new events should have been emitted
+    let events_after = env.events().all().len();
+    assert_eq!(events_before, events_after);
 }

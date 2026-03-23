@@ -24,4 +24,12 @@ impl Events {
             attestation_id.clone(),
         );
     }
+
+    /// Emit event when an attestation is renewed
+    pub fn attestation_renewed(env: &Env, attestation_id: &String, issuer: &Address, new_expiration: Option<u64>) {
+        env.events().publish(
+            (symbol_short!("renewed"), issuer.clone()),
+            (attestation_id.clone(), new_expiration),
+        );
+    }
 }

@@ -47,6 +47,14 @@ jobs:
             --wasm target/wasm32-unknown-unknown/release/trustlink.wasm \
             --wasm-out target/wasm32-unknown-unknown/release/trustlink.optimized.wasm
 
+      - name: Install wasm-tools
+        run: cargo install --locked wasm-tools
+
+      - name: Validate WASM binaries
+        run: |
+          wasm-tools validate target/wasm32-unknown-unknown/release/trustlink.wasm
+          wasm-tools validate target/wasm32-unknown-unknown/release/trustlink.optimized.wasm
+
       - name: Verify WASM artifacts
         run: |
           ls -lh target/wasm32-unknown-unknown/release/trustlink.wasm

@@ -127,6 +127,13 @@ pub fn get_subject_attestations(env: &Env, subject: Address, start: u32, limit: 
     crate::storage::paginate(env, &filtered, start, limit)
 }
 
+/// Search the subject's attestations between `from_ts` and `to_ts`, excluding deleted records.
+///
+/// This implementation uses offset-based pagination over the current filtered result set.
+/// Because GDPR deletions remove attestation IDs from the subject index, clients should
+/// prefer `get_attestations_in_range_after` for page-to-page traversal when attestations
+/// may be deleted between requests. The legacy `start`/`limit` API remains available for
+/// simple pagination but can skip records if earlier pages are changed by concurrent deletions.
 pub fn get_attestations_in_range(
     env: &Env,
     subject: Address,
@@ -149,6 +156,87 @@ pub fn get_attestations_in_range(
     for id in paginated_ids.iter() {
         if let Ok(attestation) = Storage::get_attestation(env, &id) {
             result.push_back(attestation);
+        }
+    }
+    result
+}
+
+/// Search the subject's attestations between `from_ts` and `to_ts` using cursor pagination.
+///
+/// This function is the preferred pagination path for integrators when a subject's
+/// attestations may be deleted between page fetches. The `after_attestation_id` cursor
+/// is the last attestation ID returned by the previous page. When the cursor record has
+/// been removed due to GDPR deletion, this implementation attempts to resume from the
+/// next available attestation after the deleted cursor.
+///
+/// Note: if the provided cursor ID is invalid or does not point to a known attestation,
+/// an empty result is returned in order to avoid unpredictable page recovery.
+pub fn get_attestations_in_range_after(
+    env: &Env,
+    subject: Address,
+    from_ts: u64,
+    to_ts: u64,
+    after_attestation_id: Option<String>,
+    limit: u32,
+) -> Vec<Attestation> {
+    if from_ts > to_ts {
+        return Vec::new(env);
+    }
+
+    let attestation_ids = Storage::get_subject_attestations(env, &subject);
+    let mut filtered = Vec::new(env);
+    for id in attestation_ids.iter() {
+        if let Ok(attestation) = Storage::get_attestation(env, &id) {
+            if !attestation.deleted && attestation.timestamp >= from_ts && attestation.timestamp <= to_ts {
+                filtered.push_back(attestation);
+            }
+        }
+    }
+
+    let mut start_index: u32 = 0;
+    if let Some(cursor_id) = after_attestation_id {
+        let mut cursor_found = false;
+        let mut cursor_timestamp: u64 = 0;
+        let mut cursor_id_ref = cursor_id.clone();
+        if let Ok(cursor_attestation) = Storage::get_attestation(env, &cursor_id) {
+            cursor_timestamp = cursor_attestation.timestamp;
+            for i in 0..filtered.len() {
+                if let Some(attestation) = filtered.get(i) {
+                    if attestation.id == cursor_attestation.id {
+                        start_index = i + 1;
+                        cursor_found = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            return Vec::new(env);
+        }
+
+        if !cursor_found {
+            for i in 0..filtered.len() {
+                if let Some(attestation) = filtered.get(i) {
+                    if attestation.timestamp > cursor_timestamp
+                        || (attestation.timestamp == cursor_timestamp && attestation.id > cursor_id_ref)
+                    {
+                        start_index = i;
+                        cursor_found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !cursor_found {
+            return Vec::new(env);
+        }
+    }
+
+    let mut result = Vec::new(env);
+    let end = (start_index + limit).min(filtered.len());
+    for i in start_index..end {
+        if let Some(attestation) = filtered.get(i) {
+            result.push_back(attestation.clone());
         }
     }
     result

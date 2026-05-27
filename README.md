@@ -167,9 +167,10 @@ When an issuer is removed via `remove_issuer`:
 | Existing attestations remain valid                       | Yes      | Attestation validity depends only on revocation and expiration status, not issuer registration                       |
 | `has_valid_claim` returns true for existing attestations | Yes      | Validity checks do not verify issuer registration                                                                    |
 | Removed issuer creates new attestations                  | **No**   | `create_attestation` calls `require_issuer`, which rejects unregistered issuers                                      |
-| Removed issuer revokes their own attestations            | Yes      | `revoke_attestation` only checks that the caller matches the attestation's original issuer, not current registration |
+| Removed issuer revokes their own attestations            | **No**   | `revoke_attestation` requires the caller to still be a registered issuer (deregistered issuers cannot revoke) |
 
-This is by design — attestations represent signed facts at a point in time. Removing an issuer prevents future issuance but does not retroactively invalidate previously issued attestations.
+Removing an issuer prevents future issuance and also blocks the removed issuer from revoking attestations after deregistration. Previously issued attestations remain valid unless successfully revoked by a currently-registered issuer.
+
 
 ### Register Bridge Contracts
 
@@ -551,10 +552,26 @@ let valid  = contract.get_valid_claim_count(&user_address);          // only non
 // List user's attestations (paginated)
 let attestations = contract.get_subject_attestations(&user_address, &0, &10);
 
-// Search attestations by date range (paginated)
+// Search attestations by date range (legacy offset pagination)
 let from_ts = 1_700_000_000;
 let to_ts = 1_701_000_000;
 let attestations = contract.get_attestations_in_range(&user_address, &from_ts, &to_ts, &0, &10);
+
+// Preferred page-after cursor pagination for resilient traversal across deletions
+let first_page = contract.get_attestations_in_range_after(
+    &user_address,
+    &from_ts,
+    &to_ts,
+    &None,
+    &10,
+);
+let second_page = contract.get_attestations_in_range_after(
+    &user_address,
+    &from_ts,
+    &to_ts,
+    &Some(first_page.get(9).unwrap().id.clone()),
+    &10,
+);
 
 // List issuer's attestations
 let issued = contract.get_issuer_attestations(&issuer_address, &0, &10);

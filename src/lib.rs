@@ -425,6 +425,21 @@ impl TrustLinkContract {
         query::get_attestations_in_range(&env, subject, from_ts, to_ts, start, limit)
     }
 
+    /// Cursor-based pagination over a date range. This is the recommended API for
+    /// pagination across GDPR deletions or other updates that may remove items from
+    /// the subject's attestation index between page requests.
+    #[must_use]
+    pub fn get_attestations_in_range_after(
+        env: Env,
+        subject: Address,
+        from_ts: u64,
+        to_ts: u64,
+        after_attestation_id: Option<String>,
+        limit: u32,
+    ) -> Vec<Attestation> {
+        query::get_attestations_in_range_after(&env, subject, from_ts, to_ts, after_attestation_id, limit)
+    }
+
     #[must_use]
     pub fn get_attestations_by_tag(env: Env, subject: Address, tag: String) -> Vec<String> {
         query::get_attestations_by_tag(&env, subject, tag)

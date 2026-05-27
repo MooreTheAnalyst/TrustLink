@@ -548,6 +548,7 @@ pub fn revoke_attestations_batch(
     const MAX_BATCH: u32 = 50;
 
     issuer.require_auth();
+    Validation::require_not_paused(env)?;
     Validation::require_issuer(env, &issuer)?;
     validate_reason(&reason)?;
 
@@ -555,7 +556,17 @@ pub fn revoke_attestations_batch(
         return Err(Error::LimitExceeded);
     }
 
+    let mut seen_ids: Vec<String> = Vec::new(env);
+    let mut attestations: Vec<Attestation> = Vec::new(env);
+
     for id in attestation_ids.iter() {
+        for existing_id in seen_ids.iter() {
+            if existing_id == id {
+                return Err(Error::DuplicateAttestation);
+            }
+        }
+        seen_ids.push_back(id.clone());
+
         let attestation = Storage::get_attestation(env, &id)?;
         if attestation.issuer != issuer {
             return Err(Error::Unauthorized);
@@ -563,20 +574,21 @@ pub fn revoke_attestations_batch(
         if attestation.revoked {
             return Err(Error::AlreadyRevoked);
         }
+        attestations.push_back(attestation);
     }
 
     let mut count: u32 = 0;
-    for id in attestation_ids.iter() {
-        let mut attestation = Storage::get_attestation(env, &id)?;
+    for attestation in attestations.iter() {
+        let mut attestation = attestation.clone();
         attestation.revoked = true;
         attestation.revocation_reason = reason.clone();
         Storage::set_attestation(env, &attestation);
-        Storage::remove_subject_attestation(env, &attestation.subject, &id);
-        Storage::remove_issuer_attestation(env, &issuer, &id);
-        Events::attestation_revoked_with_reason(env, &id, &issuer, &reason);
+        Storage::remove_subject_attestation(env, &attestation.subject, &attestation.id);
+        Storage::remove_issuer_attestation(env, &issuer, &attestation.id);
+        Events::attestation_revoked_with_reason(env, &attestation.id, &issuer, &reason);
         Storage::append_audit_entry(
             env,
-            &id,
+            &attestation.id,
             &AuditEntry {
                 action: AuditAction::Revoked,
                 actor: issuer.clone(),
@@ -587,7 +599,9 @@ pub fn revoke_attestations_batch(
         count += 1;
     }
 
-    Storage::increment_total_revocations(env, count as u64);
+    if count > 0 {
+        Storage::increment_total_revocations(env, count as u64);
+    }
     Ok(count)
 }
 
